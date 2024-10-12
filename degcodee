@@ -1,0 +1,227 @@
+#loading packages
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("RUVSeq")
+BiocManager::install("DESeq2")
+BiocManager::install("edgeR")
+BiocManager::install("RColorBrewer")
+BiocManager::install("mixOmics")
+BiocManager::install("EnhancedVolcano")
+BiocManager::install("pheatmap", force = TRUE)
+
+library(RUVSeq)
+library(DESeq2)
+library(edgeR)
+library(RColorBrewer)
+library(mixOmics)
+library(EnhancedVolcano)
+library(pheatmap)
+
+#SetWd to folder with counts.txt in (e.g. Male samples)
+getwd
+setwd("~/Desktop/Reorganised RNA seq")
+#Name of folder where counts text file is
+
+#prepare count file
+#open the count file in Excel, scroll to the end (eg row 27181) and remove any extra headers left over from galaxy (might have "HISAT2 etc) from the columns.
+
+#rename column 1 as Geneid. Save file as a tab separated text file. 
+
+#import data - row names = 1 means 1st row is our list of genes
+countdata <- read.delim("countsnamed.txt", row.names=1)
+head(countdata)
+#tell R what the headings and groups are by making an object with that information eg if the columns are the counts for-  M11, M10, M6, M9 - the it would be HET WT HET WT
+samples <- data.frame(genotype = c("HET", "WT", "HET", "WT"))
+samples
+
+#filter to remove genes with 0 counts
+#require 5 reads per gene in at least 2 samples to keep
+filter <- apply(countdata, 1, function(x) length(x[x>5])>=2)
+head(filter)
+filtered <- countdata[filter,]
+
+
+#label rownames as genes
+genes <- rownames(filtered)
+colnames(filtered)
+rownames(filtered)
+head(filtered)
+
+
+#RUVseq to remove unwanted variation - each is how many replicates of each 
+x <- as.factor(rep(c("HET", "WT", "HET", "WT")))
+library(RUVSeq)
+set <- newSeqExpressionSet(as.matrix(filtered),
+                           phenoData = data.frame(x, row.names=colnames(filtered)))
+set
+
+
+#initial dispersion plots
+display.brewer.pal(4, "Dark2")
+colors <- brewer.pal(4, "Dark2")
+plotRLE(set, outline=FALSE, ylim=c(-4, 4), col=colors[x])
+plotPCA(set, col=colors[x], cex=1.2)
+set <- betweenLaneNormalization(set, which="upper")
+plotRLE(set, outline=FALSE, ylim=c(-4, 4), col=colors[x])
+plotPCA(set, col=colors[x], cex=1.2)
+
+#apply RUV
+
+#this works best for other RNAseq data Use this one
+differences <- makeGroups(x)
+differences
+set3 <- RUVs(set, genes, k=2, differences)
+pData(set3)
+plotRLE(set3, outline=FALSE, ylim=c(-4, 4), col=colors[x])
+plotPCA(set3, col=colors[x], cex=1.2)
+
+#start DE analysis
+design <- model.matrix(~x + W_1, data=pData(set3)) y <- DGEList(counts=counts(set3), group=x)
+y <- calcNormFactors(y, method="upperquartile")
+y <- estimateGLMCommonDisp(y, design)
+y <- estimateGLMTagwiseDisp(y, design)
+fit <- glmFit(y, design)
+lrt <- glmLRT(fit, coef=2)
+topTags(lrt)
+
+#run DESeq2
+
+dds <- DESeqDataSetFromMatrix(countData = counts(set3),
+                              colData = pData(set3),
+                              design = ~ W_1 + x)
+dds <- DESeq(dds)
+res <- results(dds)
+res
+res05 <- results(dds, alpha=0.05)
+summary(res05)
+write.table(res05, file = 'DESeq2.txt', sep = '\t', row.names = TRUE, quote=FALSE)
+
+sum(res05$padj < 0.05, na.rm=TRUE)
+
+
+head(dds)
+colData(dds)
+
+resultsNames(dds)
+BiocManager::install("apeglm")
+resLFC <- lfcShrink(dds, coef="x_WT_vs_HET", type="apeglm")
+resLFC
+
+
+#someplots, can change the Y axis limits eg from 2 to 5, to display the data better
+plotMA(res, ylim=c(-2,2))
+plotMA(resLFC, ylim=c(-5,5))
+
+dev.off()
+# Clear all plots
+while (!is.null(dev.list()))  dev.off()
+
+#add gene symbol
+BiocManager::install("AnnotationDbi")
+BiocManager::install("org.Mm.eg.db")
+library(AnnotationDbi)
+library(org.Mm.eg.db)
+# Assuming res_df is your DESeq2 results data frame with Entrez IDs as rownames
+entrez_ids <- rownames(res05)
+
+# Convert Entrez IDs to gene symbols
+gene_symbols <- mapIds(org.Mm.eg.db, keys = entrez_ids, column = "SYMBOL", keytype = "ENTREZID", multiVals = "first")
+
+# Add gene symbols to the data frame
+res05$gene_symbol <- gene_symbols
+
+# Update rownames to gene symbols if needed
+rownames(res05) <- gene_symbols
+
+# Check the updated data frame
+head(res05)
+#save the file
+write.table(res05, file = 'DESeq2_symbols.txt', sep = '\t', row.names = TRUE, quote=FALSE)
+
+# If res05 is a DESeq2 results object, first convert it to a data frame
+res05_df <- as.data.frame(res05)
+
+# Remove rows with NA in the padj column
+res05_df <- res05_df[!is.na(res05_df$padj), ]
+
+# Filter the data frame for padj < 0.05 and absolute log2FoldChange > 2 (keeping the top significant genes, with the highest foldchange in gene expression)
+filtered_res <- res05_df[res05_df$padj < 0.05 & abs(res05_df$log2FoldChange) > 2, ]
+
+# View the filtered results (you can also write this to a file)
+head(filtered_res)
+write.table(filtered_res, file = 'DESeq2_sig_genes.txt', sep = '\t', row.names = TRUE, quote=FALSE)
+
+
+# Load the required libraries
+library(ggplot2)
+library(ggrepel)
+
+# Create a 'significant' column based on adjusted p-value and log2FoldChange thresholds
+res05_df$significant <- "Not Significant"
+res05_df$significant[res05_df$padj < 0.05 & abs(res05_df$log2FoldChange) > 2] <- "Significant"
+
+# Select top genes based on adjusted p-value
+top_genes <- head(res05_df[order(res05_df$padj), ], 10)
+
+# Load required libraries for plotting
+library(ggplot2)
+library(ggrepel)
+
+# Plot Volcano Plot with gene labels using gene symbols
+ggplot(res05_df, aes(x = log2FoldChange, y = -log10(padj), color = significant)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  scale_color_manual(values = c("Not Significant" = "grey", "Significant" = "red")) +
+  theme_minimal() +
+  labs(title = "Volcano Plot", x = "Log2 Fold Change", y = "-Log10 Adjusted P-value") +
+  theme(legend.position = "top") +
+  # Add gene labels with gene symbols
+  geom_text_repel(data = top_genes, aes(label = gene_symbol),
+                  size = 3, # Adjust size as needed
+                  box.padding = 0.35, # Space around text
+                  point.padding = 0.3, # Space around points
+                  segment.color = 'grey50') # Line color between point and text
+
+#generate a heatmap
+
+# Load necessary libraries
+library(DESeq2)
+library(pheatmap)
+
+# Assume 'dds' is your DESeq2 dataset
+
+# Extract normalized counts from DESeq2
+normalized_counts <- counts(dds, normalized = TRUE)
+
+# Define the number of top genes you want to include in the heatmap
+top_n <- 20
+
+# Select the top genes based on the absolute log2FoldChange
+# Ensure this is a data frame
+top_genes <- head(filtered_res[order(abs(filtered_res$log2FoldChange), decreasing = TRUE), ], top_n)
+
+# Set the gene symbols as row names
+rownames(top_genes) <- top_genes$gene_symbol
+
+# Subset the normalized counts matrix for these top genes using gene symbols
+top_genes_counts <- normalized_counts[rownames(top_genes), ]
+
+# Optional: Log transform the counts for better visualization
+log_top_genes_counts <- log2(top_genes_counts + 1)
+
+# Prepare annotation data for conditions (if needed)
+# Assuming you have a vector 'x' that contains the conditions (e.g., c("WT", "HET", "WT", "HET"))
+annotation_col <- data.frame(Condition = x)
+rownames(annotation_col) <- colnames(log_top_genes_counts)
+
+# Create the heatmap for top genes using gene ID as row names
+pheatmap(log_top_genes_counts,
+         cluster_rows = TRUE,    # Cluster rows (genes)
+         cluster_cols = TRUE,    # Cluster columns (samples)
+         scale = "row",          # Scale rows to Z-scores
+         show_rownames = TRUE,   # Show row names (gene symbols)
+         show_colnames = TRUE,   # Show column names (sample names)
+         annotation_col = annotation_col, # Add column annotations for conditions
+         color = colorRampPalette(c("navy", "white", "firebrick"))(50))  # Custom color scale
+
+
